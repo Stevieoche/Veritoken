@@ -307,6 +307,32 @@ impl InvoiceToken {
         Self::do_create_invoice(&env, meta);
     }
 
+    /// List invoice IDs with pagination (zero-based offset, page size 1–50).
+    /// Panics with `InvalidMetadata` when `page_size` is zero or exceeds 50.
+    pub fn get_invoices_page(env: Env, page: u32, page_size: u32) -> Vec<String> {
+        env.storage().instance().extend_ttl(THRESHOLD, BUMP);
+        const MAX_PAGE_SIZE: u32 = 50;
+        if page_size == 0 || page_size > MAX_PAGE_SIZE {
+            panic_with_error!(env, InvoiceError::InvalidMetadata);
+        }
+        let list: Vec<String> = env
+            .storage()
+            .instance()
+            .get(&DataKey::InvoicesList)
+            .unwrap_or_else(|| Vec::new(&env));
+        let total = list.len();
+        let start = page.saturating_mul(page_size);
+        let mut result: Vec<String> = Vec::new(&env);
+        if start >= total {
+            return result;
+        }
+        let end = (start + page_size).min(total);
+        for i in start..end {
+            result.push_back(list.get(i).expect("index in bounds"));
+        }
+        result
+    }
+
     /// List invoice IDs with pagination (zero-based offset, capped at 50).
     pub fn list_invoices(env: Env, start: u32, limit: u32) -> Vec<String> {
         env.storage().instance().extend_ttl(THRESHOLD, BUMP);
@@ -457,6 +483,11 @@ impl InvoiceToken {
             .get(&DataKey::InvoiceMeta(invoice_id.clone()))
             .expect("invoice must exist");
 
+        // Guard: face_value_usd must be positive before any state is written.
+        if meta.face_value_usd <= 0 {
+            panic_with_error!(env, InvoiceError::UnderSettlement);
+        }
+
         let from_status = Self::read_status(&env, &invoice_id);
         if matches!(
             from_status,
@@ -596,6 +627,11 @@ impl InvoiceToken {
         env.storage().instance().extend_ttl(THRESHOLD, BUMP);
         from.require_auth();
         Self::require_lifecycle_active(&env);
+
+        // Guard: redemption amount must be positive before any state is read or written.
+        if amount <= 0 {
+            panic_with_error!(env, InvoiceError::UnderSettlement);
+        }
 
         let status = Self::read_status(&env, &invoice_id);
         if !matches!(
@@ -1296,6 +1332,10 @@ impl InvoiceToken {
         Self::validate_webhook(env, &meta.notification_webhook);
         Self::validate_invoice_meta(env, &meta);
         let invoice_id = meta.invoice_id.clone();
+        // Guard: invoice_id must not be empty.
+        if invoice_id.is_empty() {
+            panic_with_error!(env, InvoiceError::InvalidMetadata);
+        }
         if env
             .storage()
             .persistent()
